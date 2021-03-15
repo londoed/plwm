@@ -255,4 +255,195 @@ sub get_widget_in_position {
 sub handle_button_press {
 	my $e = shift;
 	my $widget = $self->get_widget_in_position(e);
+
+	if (defined $widget) {
+		$widget->button_press(
+			$e->{event_x} - $widget->{offset_x},
+			$e->{event_y} - $widget->{offset_y},
+			$e->{detail}
+		);
+	}
 }
+
+sub handle_button_release {
+	my $e = shift;
+	my $widget = $self->get_widget_in_position($e);
+
+	if (defined $widget) {
+		$widget->button_release(
+			$e->{event_x} - $widget->{offset_x},
+			$e->{event_y} - $widget->{offset_y},
+			$e->{detail}
+		);
+	}
+}
+
+sub handle_enter_notify {
+	my $e = shift;
+	my $widget = $self->get_widget_in_position($e);
+
+	if (defined $widget) {
+		$widget->mouse_enter(
+			$e->{event_x} - $widget->{offset_x},
+			$e->{event_y} - $widget->{offset_y}
+		);
+	}
+
+	$self->{cursor_in} = $widget;
+}
+
+sub handle_leave_notify {
+	my $e = shift;
+
+	if (defined $self->{cursor_in}) {
+		$self->{cursor_in}->mouse_leave(
+			$e->{event_x} - $self->{cursor_in}->{offset_x},
+			$e->{event_y} - $self->{cursor_in}->{offset_y}
+		);
+	}
+
+	$self->{cursor_in} = undef;
+}
+
+sub handle_motion_notify {
+	my $e = shift;
+	my $widget = $self->get_widget_in_position($e);
+
+	if (defined $widget && defined $self->{cursor_in} && $widget != $self->{cursor_in}) {
+		$self->{cursor_in}->mouse_leave(
+			$e->{event_x} - $self->{cursor_in}->{offset_x},
+			$e->{event_y} - $self->{cursor_in}->{offset_y}
+		);
+
+		$widget->mouse_enter(
+			$e->{event_x} - $widget->{offset_x},
+			$e->{event_y} - $widget->{offset_y}
+		);
+	}
+
+	$self->{cursor_in} = widget;
+}
+
+sub widget_grab_keyboard {
+	my $widget = shift;
+
+	$self->{window}->handle_key_press() = $widget->handle_key_press();
+	$self->{saved_focus} = $self->{tile}->{current_window};
+	$self->{window}->{window}->set_input_focus();
+}
+
+sub widget_ungrab_keyboard {
+	$self->{window}->handle_key_press() = undef;
+
+	if (defined $self->{saved_focus}) {
+		$self->{saved_focus}->{window}->set_input_focus();
+	}
+}
+
+sub draw {
+	if (!defined $self->{widgets}) {
+		return;
+	}
+
+	if ($self->{queued_draws} == 0) {
+		$self->{tile}->call_soon($self->actual_draw());
+	}
+
+	$self->{queued_draws}++;
+}
+
+sub actual_draw {
+	$self->{queued} = 0;
+	$self->resize($self->{length}, $self->{widgets});
+
+	for my $i ($self->{widgets}) {
+		$i->draw();
+	}
+
+	my $end = $i->{offset} + $i->{length};
+
+	if ($end < $self->{length}) {
+		if ($self->{horizontal}) {
+			$self->{drawer}->draw(offset_x => $end, width => $self->{length} - $end);
+		} else {
+			$self->{drawer}->draw(offset_y => $end, height => $self->{length} - $end);
+		}
+	}
+}
+
+sub info {
+	my @widget_info;
+
+	for my $i ($self->{widgets}) {
+		push @widget_info, $i->info();
+	}
+	return {
+		size => $self->{size},
+		length => $self->{length},
+		width => $self->{width},
+		height => $self->{height},
+		position => $self->{position},
+		widgets => @widget_info,
+		window => $self->{window}->{window}->{wid},
+	};
+}
+
+sub is_show {
+	return $self->{size} != 0;
+}
+
+sub show {
+	my $is_show = shift;
+
+	if (defined $is_show != $self->is_show()) {
+		if (defined $is_show) {
+			$self->{size} = $self->{size}->{size_calculated};
+			$self->{window}->unhide();
+		} else {
+			$self->{size_calculated} = $self->{size};
+			$self->{size} = 0;
+			$self->{window}->hide();
+		}
+
+		$self->{screen}->{group}->layout_all();
+	}
+}
+
+sub adjust_for_strut {
+	my $size = shift;
+
+	if ($self->{size}) {
+		$self->{size} = $self->{initial_size};
+	}
+
+	if (!defined $self->{margin}) {
+		$self->{margin} = (0, 0, 0, 0);
+	}
+
+	if ($self->{screen}->{top} ~~ $self) {
+		$self->{margin}[0] += $size;
+	} elsif ($self->{screen}->{bottom} ~~ $self) {
+		$self->{margin}[2] += $size;
+	} elsif ($self->{screen}->{left} ~~ $self) {
+		$self->{margin}[3] += $size;
+	} else {
+		$self->{margin}[1] += $size;
+	}
+}
+
+sub cmd_fake_button_press {
+	my ($screen, $position, $x, $y, $button) = @_;
+
+	{
+		package _Fake;
+		sub new {}
+	}
+
+	my $fake = _Fake->new;
+	$fake->{event_x} = $x;
+	$fake->{event_y} = $y;
+	$fake->{detail} = $button;
+	
+	$self->handle_button_press($fake);
+}
+
