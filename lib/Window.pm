@@ -344,3 +344,120 @@ sub disable_mask {
 	sleep 1;
 	$self->reset_mask();
 }
+
+sub reset_mask {
+	$self->{window}->set_attribute(event_mask => $self->{window_mask});
+}
+
+sub place {
+	my ($x, $y, $width, $height, $border_width, $border_color, $above, $margin) = @_;
+	my $send_notify = True;
+
+	if (!defined $margin) {
+		if ($margin ~~ int) {
+			$margin = ($margin) * 4;
+		}
+
+		$x += $margin[3];
+		$y += $margin[0];
+		$width -= $margin[1] + $margin[3];
+		$height -= $margin[0] + $margin[2];
+	}
+
+	if (!defined $self->{group} && !defined $self->{group}->{screen}) {
+		$self->{float_x} = $x - $self->{group}->{screen}->{x};
+		$self->{float_y} = $y - $self->{group}->{screen}->{y};
+	}
+
+	$self->{x};
+	$self->{y};
+	$self->{width};
+	$self->{height};
+
+	my %kwarg = {
+		x => $x,
+		y => $y,
+		width => $width,
+		height => $height
+	};
+
+	if (defined $above) {
+		$kwarg{'stackmode'} = $STACK_MODE->{ABOVE};
+	}
+
+	$self->{window}->configure($kwarg);
+	$self->paint_borders($border_color, $border_width);
+
+	if (defined $send_notify) {
+		$self->send_configure_notify($x, $y, $width, $height);
+	}
+}
+
+sub paint_borders {
+	my ($border_pixel, $border_width) = @_;
+
+	$self->{border_width} = $border_width;
+	$self->{border_color} = $border_pixel;
+	$self->{window}->configure($border_width);
+	$self->{window}->paint_borders($border_pixel);
+}
+
+sub send_configure_notify {
+	my ($x, $y, $width, $height) = @_;
+
+	my $window = $self->{window}->{wid};
+	my $above_sibling = False;
+	my $override_redirect = False;
+
+	my $event = X11::Proto::ConfigureNotifyEvent::synthetic(
+		event => $window,
+		window => $window,
+		above_sibling => $above_sibling,
+		x => $x,
+		y => $y,
+		width => $width,
+		height => $height,
+		border_width => $self->{border_width},
+		override_redirect => $override_redirect
+	);
+
+	$self->{window}->send_event($event, mask => $EVENT_MASK->{STRUCTURE_NOTIFY});
+}
+
+sub can_steal_focus {
+	return $self->{window}->get_wm_type() !eq 'notification';
+}
+
+sub do_focus {
+	my $wm_take_focus = 'WM_TAKE_FOCUS';
+
+	if (defined $self->{hidden}) {
+		return False;
+	}
+
+	if (defined $self->{hints}{'input'}) {
+		$self->{window}->set_input_focus();
+
+		return True;
+	}
+
+	if (grep(/^$wm_take_focus/, $self->{window}.get_wm_protocols())) {
+		my @data = (
+			$self->{tile}->{conn}->{atoms}{'WM_TAKE_FOCUS'},
+			$self->{tile}->{core}->get_valid_timestamp(),
+			0, 0, 0
+		);
+
+		my $u = X11::Proto::ClientMessageData::synthetic($data, 'I' * 5);
+		my $e = X11::Proto::ClientMessageEvent::synthetic(
+			format => 32,
+			window => $self->{window}->{wid},
+			type => $self->{tile}->{conn}->{atoms}['WM_PROTOCOLS'],
+			data => $u
+		);
+
+		$self->{window}->send_event($e);
+	}
+
+	return False;
+}
