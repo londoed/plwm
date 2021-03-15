@@ -13,6 +13,7 @@ package Window;
 
 use X11::Proto;
 use Plwm qw(hook utils CommandError CommandObject logger);
+use Math::Round;
 
 # CONSTANTS #
 our $NO_VALUE 															= 0x0000;
@@ -156,6 +157,190 @@ sub new {
 }
 
 sub has_focus {
-	
+	return $self == $self->{tile}->{current_window};
 }
 
+sub has_fixed_size {
+	my $p_min_size = 'PMinSize';
+
+	if (grep(/^$p_min_size/, $self->{hints}{'flags'}) && 
+		grep(/^$p_min_size/, $self->{hints}{'flags'}) &&
+		$self->{hints}{'max_width'} == $self->{hints}{'min_width'} > 0 &&
+		$self->{hints}{'max_height'} == $self->{hints}{'max_height'} > 0) {
+		
+		return True;
+	}
+
+	return False;
+}
+
+sub hash_user_set_position {
+	my $us_pos = 'USPosition';
+	my $p_pos = 'PPosition';
+	if (grep(/^$us_pos/, $self->{hints}{'flags'}) || grep(/^$p_pos/, $self->{hints}{'flags'})) {
+		return True;
+	}
+
+	return False;
+}
+
+sub update_name {
+	$self->{name} = $self->{window}->get_name() || die "[!] ERROR: plwm: $!";
+	$hook->fire('client_name_updated', $self);
+}
+
+sub update_hints {
+	my $h = $self->{window}->get_wm_hints() || die "[!] ERROR: plwm: $!\n";
+	my $norm_h = $self->{window}->get_wm_normal_hints() || die "[!] ERROR: plwm: $!\n";
+	my $urgency_hint = 'UrgencyHint'
+
+	if (defined $norm_h) {
+		$self->{hints}->update($norm_h);
+	}
+
+	if (defined $h && grep(/^$urgency_hint/, $h{'flags'})) {
+		if ($self->{tile}->{current_window !~~ $self}) {
+			$self->{hints}{'urgent'} = False;
+			$hook->fire('client_urgent_hint_changed', $self);
+		}
+	} elsif (defined $self->{urgent}) {
+		$self->{hints}{'urgent'} = False;
+		$hook->fire('client_urgent_hint_changed', $self);
+	}
+
+	my $input_hint = 'InputHint';
+
+	if (defined $h && grep(/^$input_hint/, $h{'flags'})) {
+		$self->{hints}{'input'} = $h{'input'};
+	}
+
+	if ($self->get_group($self, undef)) {
+		$self->{group}->layout_all();
+	}
+
+	return;
+}
+
+sub update_state {
+	my @triggered = ('urgent');
+
+	if (defined $self->{tile}->{config}->{auto_fullscreen}) {
+		push @triggered, 'fullscreen';
+	}
+
+	my $state = $self->{window}->get_net_wm_state();
+	$logger->debug("_NET_WM_STATE: $state");
+
+	for my $s (@triggered) {
+		$self->set_attr($s, grep(/^$s/, $state));
+	}
+}
+
+sub urgent {
+	my $val = shift;
+
+	if (!defined $val) {
+		$self->{hints}{'urgent'} = False;
+	}
+}
+
+sub info {
+	if ($self->{group}) {
+		$group = $self->{group}->{name};
+	} else {
+		$group = undef;
+	}
+
+	return {
+		name => $self->{name},
+		x => $self->{x},
+		y => $self->{y},
+		width => $self->{width},
+		height => $self->{height},
+		group => $group,
+		id => $self->{window}->{wid},
+		floating => $self->{float_state} != $NOT_FLOATING,
+		float_info => $self->{float_info},
+		maximized => $self->{float_state} == $MAXIMIZED,
+		minimized => $self->{float_state} == $MINIMIZED,
+		fullscreen => $self->{float_state} == $FULLSCREEN,
+	};
+}
+
+sub state {
+	return $self->{window}->get_wm_state()[0];
+}
+
+sub state {
+	my $val = shift;
+
+	if (grep(/^$val/, ($WITHDRAWN_STATE, $NORMAL_STATE, $ICONIC_STATE))) {
+		$self->{window}->set_property('WM_STATE', ($val, 0));
+	}
+}
+
+sub set_opacity {
+	my $opacity = shift;
+
+	if ($opacity <= 1.0 && $opacity >= 0.0) {
+		my $real_opacity = int($opacity * 0xffffffff);
+		$self->{window}->set_property('_NET_WM_WINDOW_OPACTIY', $real_opacity);
+	} else {
+		return;
+	}
+}
+
+sub get_opacity {
+	my $opacity = $self->{window}->get_property('_NET_WINDOW_OPACITY');
+
+	if (!defined $opacity) {
+		return 1.0;
+	} else {
+		my $value = $opacity;
+		my $as_float = round($value / 0xffffffff, 2);
+
+		return $as_float;
+	}
+}
+
+sub kill {
+	my $wm_delete_window = 'WM_DELETE_WINDOW';
+	if (grep(/^$wm_delete_window/, $self->{window}->get_wm_protocols())) {
+		my @data = (
+			$self->{tile}->{conn}->{atoms}{'WM_DELETE_WINDOW'},
+			X11::Proto::Time::current_time(),
+			0, 0, 0
+		);
+
+		my $u = X11:Proto::ClientMessageEvent::synthetic(@data, "I" * 5);
+		my $e = X11::Proto::ClientMessageEvent::synthetic(
+			format => 32,
+			window => $self->{window}->{wid},
+			type => $self->{tile}->{conn}->{atoms}{'WM_PROTOCOLS'},
+			data => $u
+		);
+
+		$self->{window}->send_event($e);
+	} else {
+		$self->{window}->kill_client();
+	}
+
+	$self->{tile}->{conn}->flush();
+}
+
+sub hide {
+	if ($self->disable_mask(X11::Proto::EventMask::StructureNotify)) {
+		$self->{window}->unmap();
+	}
+
+	$self->{state} = $NORMAL_STATE;
+	$self->{hidden} - False;
+}
+
+sub disable_mask {
+	my $mask = shift;
+
+	$self->disable_mask($mask);
+	sleep 1;
+	$self->reset_mask();
+}
