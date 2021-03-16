@@ -9,12 +9,12 @@
 use strict;
 use warnings;
 
-package Window;
-
 use X11::Proto;
-use Plwm qw(hook utils CommandError CommandObject logger);
+use Plwm qw(hook utils CommandError CommandObject logger Static);
 use Math::Round;
-use List::MoreUtils qw(first_index);
+use List::MoreUtils qw(first_index, uniq);
+
+package _Window;
 
 # CONSTANTS #
 our $NO_VALUE 															= 0x0000;
@@ -463,7 +463,7 @@ sub do_focus {
 	return False;
 }
 
-1sub focus {
+sub focus {
 	my $warp = shift;
 	my $did_focus = $self->do_focus();
 
@@ -570,7 +570,7 @@ sub cmd_inspect {
 }
 
 package Internal;
-@ISA = qw(Window);
+@ISA = qw(_Window);
 
 my $window_mask = $EVENT_MASK | $STRUCTURE_NOTIFY | $PROPERTY_CHANGE | $ENTER_WINDOW |
 	$LEAVE_WINDOW | $POINTER_MOTION | $FOCUS_CHANGE | $EXPOSURE | $BUTTON_PRESS | $BUTTON_RELEASE |
@@ -657,11 +657,631 @@ sub handle_configure_request {
 }
 
 sub update_strut {
-	my @strut = $self->{window}->get_property('_NET_WM_STRUT_PARTIAL');
+	my $strut = $self->{window}->get_property('_NET_WM_STRUT_PARTIAL');
 
-	@strut = @strut || $self->{window}->get_property('_NET_WM_STRUT');
+	$strut = $strut || $self->{window}->get_property('_NET_WM_STRUT');
 
-	if (defined @strut) {
-		$self->{tile}->add_strut(@strut);
+	if (defined $strut) {
+		$self->{tile}->add_strut($strut);
 	}
+
+	$self->{strut} = $strut;
+}
+
+sub handle_property_notify {
+	my $e = shift;
+	my $name = $self->{tile}->{conn}->{atoms}->get_name($e->{atom});
+
+	if (grep(/^$name/, ("_NET_WM_STRUT_PARTIAL", "_NET_WM_STRUT"))) {
+		$self->update_strut();
+	}
+}
+
+sub representation {
+	return "Static($self->{name})"
+}
+
+package Window;
+@ISA = qw(_Window);
+
+my $window_mask = $STRUCTURE_NOTIFY | $PROPERTY_CHANGE | $ENTER_WINDOW | $FOCUS_CHANGE;
+my $defunct = False;
+
+sub new {
+	my ($window, $plwm) = @_;
+
+	$self->{group} = undef;
+	$self->update_name();
+
+	my $group = undef;
+	my $index = $window->get_wm_desktop();
+
+	if (defined $index && $index < scalar $tile->{groups}) {
+		$group = $plwm->{groups}[$index];
+	} elsif (!defined $index) {
+		my $transient_for = $window->get_wm_transient_for();
+		my $win = $plwm->{windows_map}->get($transient_for);
+
+		if (defined $win) {
+			$group = $win->{group};
+		}
+	}
+
+	if (defined $group) {
+		$group->add($self);
+		$self->{group} = $group;
+
+		if ($group != $plwm->{current_screen}->{group}) {
+			$self->hide();
+		}
+	}
+
+	$plwm->{conn}->{conn}->{core}->change_save_set($SET_MODE->{INSERT}, $self->{window}->{wid});
+	$self->update_wm_net_icon();
+}
+
+sub group_get {
+	return $self->{group};
+}
+
+sub group {
+	my $group = shift;
+
+	if $group {
+		$self->{window}->set_property('_NET_WM_DESKTOP', $self->{plwm}->{groups}->index($group))
+			|| die "[!] ERROR: plwm: Got error setting _NET_WM_DESKTOP too earlu\n";
+	}
+
+	$self->{group} = $group;
+}
+
+sub edges {
+	return ($self->{x}, $self->{y}, $self->{x} + $self->{width}, $self->{y} + $self->{height});
+}
+
+sub floating_get {
+	return $self->{float_state} != $NOT_FLOATING;
+}
+
+sub floating {
+	my $do_float = shift;
+
+	if (defined $do_float && $self->{float_state} == $NOT_FLOATING) {
+		if (defined $self->{group} && defined $self->{group}->{screen}) {
+			$screen = $self->{group}->{screen};
+			$self->enable_floating($screen->{x} + $self->{float_x}, $screen->{y} + $self->{float_y},
+				$self->{float_width}, $self->{float_height});
+		} else {
+			$self->{float_state} = $FLOATING;
+		}
+	} elsif ((!$do_float) && $self->{float_state} != $NOT_FLOATING) {
+		if ($self->{float_state} == $FLOATING) {
+			$self->{float_width} = $self->{width};
+			$self->{float_height} = $self->{height};
+		}
+
+		$self->{float_state} = $NOT_FLOATING;
+		$self->{group}->mark_floating($self, False);
+		$hook->fire('float_change');
+	}
+}
+
+sub toggle_floating {
+	$self->{floating} = !$self->{floating};
+}
+
+sub fullscreen_get {
+	return $self->{float_state} == $FULLSCREEN;
+}
+
+sub fullscreen {
+	my $do_full = shift;
+	my $atom = uniq ($self->{plwm}->{conn}->{atoms}['_NET_WM_STATE_FULLSCREEN']);
+	my $prev_state = uniq ($self->{window}->get_property('_NET_WM_STATE', 'ATOM'));
+
+	sub set_state {
+		my ($old_state, $new_state) = @_;
+
+		if ($new_state != $old_state) {
+			$self->{window}->set_property('_NET_WM_STATE', ($new_state));
+		}
+	}
+
+	if (defined $do_full) {
+		my $screen = $self->{group}->{screen} || $self->{plwm}->find_closest_screen($self->{x}, $self->{y});
+
+		$self->enable_floating(
+			$screen->{x},
+			$screen->{y},
+			$screen->{width},
+			$screen->{height},
+			new_float_state => $FULLSCREEN
+		);
+
+		set_state($prev_state, $prev_state | $atom);
+
+		return;
+	}
+
+	if ($self->{float_state} == $FULLSCREEN) {
+		set_state($prev_state, $prev_state - $atom);
+		$self->{floating} = False;
+
+		return;
+	}
+}
+
+sub toggle_fullscreen {
+	$self->{fullscreen} = !$self->{fullscreen};
+}
+
+sub maximized_get {
+	return $self->{float_state} == $MAXIMIZED;
+}
+
+sub maximixed {
+	my $do_maximized = shift;
+
+	if (defined $do_maximized) {
+		my $screen = $self->{group}->{screen} || $self->{plwm}->fild_closest_screen($self->{x}, $self->{y});
+
+		$self->enable_floating(
+			$screen->{dx},
+			$screen->{dy},
+			$screen->{dwidth},
+			$screen->{dheight},
+			new_float_state => $MAXIMIZED
+		);
+	} else {
+		if ($self->{float_state} == $MAXIMIZED) {
+			$self->{floating} = False;
+		}
+	}
+}
+
+sub toggle_maximized {
+	$self->{maximized} = !$self->{maximized};
+}
+
+sub mimimized_get {
+	return $self->{float_state} == $MINIMIZED;
+}
+
+sub minimized {
+	my $do_minimize = shift;
+
+	if (defined $do_minimize) {
+		if ($self->{float_state} != $MINIMIZED) {
+			$self->enable_floating(new_float_state => $MINIMIZED);
+		} else {
+			if ($self->{float_state} == $MINIMIZED) {
+				$self->{floating} = False;
+			}
+		}
+	}
+}
+
+sub toggle_minimized {
+	$self->{minimized} = !$self->{minimized};
+}
+
+sub cmd_static {
+	my ($screen, $x, $y, $width, $height) = @_;
+
+	###
+	 # Makes this window a static window, attached to a Screen.
+	 #
+	 # If any of the arguments are left unspecified, the values given
+	 # by the window itself are used instead. So, for a window that's
+	 # aware of its appropriate size and location, you don't have to
+	 # specify anything.
+	###
+	$self->{defunct} = True;
+
+	if (!defined $screen) {
+		$screen = $self->{plwm}->{current_screen};
+	} else {
+		$screen = $self->{plwm}->{screens}[$screen];
+	}
+
+	if ($self->{group}) {
+		$self->{group}->remove($self);
+	}
+
+	my $s = Static->new($self->{window}, $self->{plwm}, $screen, $x, $y, $width, $height);
+	$self->{plwm}->{windows_map}[$self->{window}->{wid}] = $s;
+	$hook->fire('client_managed', $s);
+}
+
+sub tweak_float {
+	my ($x, $y, $dx, $dy, $w, $h, $dw, $dh) = @_;
+
+	if (defined $x) {
+		$self->{x} = $x;
+	}
+
+	$self->{x} += $dx;
+
+	if (defined $y) {
+		$self->{y} = $y;
+	}
+
+	$self->{y} += $dy;
+
+	if (defined $w) {
+		$self->{width} = $w;
+	}
+
+	$self->{width} += $dw;
+
+	if (defined $h) {
+		$self->{height} = $h;
+	}
+
+	$self->{height} += $dh;
+
+	if ($self->{height} < 0) {
+		$self->{height} = 0;
+	}
+
+	if ($self->{width} < 0) {
+		$self->{width} = 0;
+	}
+
+	my $screen = $self->{plwm}->find_closest_screen($self->{x} + $self->{width} // 2,
+		$self->{y} + $self->{height} // 2);
+
+	if (defined $self->{group} && defined $screen && $screen != $self->{group}->{screen}) {
+		$self->{group}->remove($self, force => True);
+		$screen->{group}->add($self, force => True);
+		$self->{plwm}->focus_screen($screen->{index});
+	}
+
+	$self->reconfigure_floating();
+}
+
+sub get_size {
+	return ($self->{width}, $self->{height});
+}
+
+sub get_position {
+	return ($self->{x}, $self->{y});
+}
+
+sub reconfigure_floating {
+	my $new_float_size = shift;
+
+	if ($new_float_size == $MINIMIZED) {
+		$self->hide();
+	} else {
+		my $width = $self->{width};
+		my $height = $self->{height};
+		my @flags = $self->{hints}->get('flags');
+
+		if (grep(/^"PMinSize"/, @flags)) {
+			$width = max($self->{width}, $self->{hints}->get('min_width'));
+			$height = max($self->{height}, $self->{hints}->get('min_height'));
+		}
+
+		if (grep(/^"PMaxSize"/, @flags)) {
+			$width = min($width, $self->{hints}->get('max_width')) || $width;
+			$height = min($height, $self->{hints}->get('max_height')) || $height;
+		}
+
+		if ($self->{hints}['base_width'] && $self->{hints}['width_inc']) {
+			my $width_adjustment = ($width - $self->{hints}['base_width']) % $self->{hints}['width_inc'];
+			$width -= $width_adjustment;
+
+			if ($new_float_state == $FULLSCREEN) {
+				$self->{x} += round $width_adjustment / 2;
+			}
+		}
+
+		if ($self->{hints}['base_height'] && $self->{hints}['height_inc']) {
+			my $height_adjustment = ($height - $self->{hints}['base_height']) % $self->{hints}['height_inc'];
+			$height -= $height_adjustment;
+
+			if ($new_float_state == $FULLSCREEN) {
+				$self->{y} += round $height_adjustment / 2;
+			}
+		}
+
+		$self->place(
+			$self->{x},
+			$self->{y},
+			$self->{width},
+			$self->{height},
+			$self->{border_width},
+			$self->{border_color},
+			above => True
+		);
+	}
+
+	if ($self->{float_state} != $new_float_state) {
+		$self->{float_state} = $new_float_state;
+
+		if ($self->{group}) {
+			$self->{group}->mark_floating($self, True);
+		}
+
+		$hook->fire('float_change');
+	}
+}
+
+sub enable_floating {
+	my ($x, $y, $w, $h, $new_float_state) = @_;
+
+	if ($new_float_state == $MINIMIZED) {
+		$self->{x} = $x;
+		$self->{y} = $y;
+		$self->{width} = $w;
+		$self->{height} = $h;
+	}
+
+	$self->reconfigure_floating(new_float_state => $new_float_state);
+}
+
+sub to_group {
+	my ($group_name, $switch_group) = @_;
+
+	if (!defined $group_name) {
+		my $group = $self->{plwm}->{current_group};
+	} else {
+		my $group = $self->{plwm}->{groups_map}->get($group_name);
+
+		die "[!] ERROR: plwm: No such group : $group_name" if (!defined $group);
+	}
+
+	if ($self->{group} != $group) {
+		$self->hide();
+
+		if (defined $self->{group}) {
+			$self->{x} -= $self->{group}->{screen}->{x} if (defined $self->{group}->{screen});
+			$self->{group}->remove($self);
+		}
+
+		if (defined $group->{screen} && $self->{x} < $group->{screen}->{x}) {
+			$self->{x} += $group->{screen}->{x};
+		}
+
+		$group->add($self);
+
+		if (defined $switch_group) {
+			$group->cmd_to_screen(toggle => False);
+		}
+	}
+}
+
+sub to_screen {
+	my $index = shift;
+
+	if (!defined $index) {
+		my $screen = $self->{plwm}->{current_screen};
+	} else {
+		my $screen = $self->{plwm}->{screens}[$index] ||
+			die "[!] ERROR: plwm: No such screen : $index";
+	}
+
+	$self->to_group($screen->{group}->{name});
+}
+
+sub match {
+	return $match->compare($self) ||
+		False;
+}
+
+sub handle_enter_notify {
+	$hook->fire('client_mouse_enter', $self);
+
+	if ($self->{plwm}->{config}->{follow_mouse_focus}) {
+		$self->{group}->focus($self, False) if ($self->{group}->{current_window} != $self);
+		
+		if ($self->{group}->{screen} && $self->{plwm}->{current_screen} != $self->{plwm}->{screen}) {
+			$self->{plwm}->focus_screen($self->{group}->{screen}->{index}, False);
+		}
+	}
+
+	return True;
+}
+
+sub handle_configure_request {
+	my $e = shift;
+
+	return if (defined $self->{plwm}->{drag} && $self->{plwm}->{current_window} == $self);
+
+	if ($self.get_attr('floating', False)) {
+		my $cw = XCB::XProto::ConfigWindow->new;
+		my $width = ($e->{value_mask} & $cw->{Width}) ? $e->{width} : $self->{width};
+		my $height = ($e->{value_mask} & $cw->{Height} ? $e->{height} : $self->{height});
+		my $x = ($e->{value_mask} & $cw->{X}) ? $e->{x} : $self->{x};
+		my $y = ($e->{value_mask} & $cw->{Y}) ? $e->{y} : $self->{y};
+	} else {
+		my ($width, $height, $x, $y) = ($self->{width}, $self->{height}, $self->{x}, $self->{y});
+	}
+
+	if (defined $self->group && defined $self->{group}->{screen}) {
+		$self->place(
+			$x,
+			$y,
+			$width,
+			$height,
+			$self->{border_width},
+			$self->{border_color}
+		);
+	}
+
+	$self->update_state();
+
+	return False;
+}
+
+sub update_wm_net_icon {
+	my @icon = $self->{window}->get_property('_NET_WM_ICON', 'CARDINAL');
+
+	return if (!defined $icon);
+
+	@icon = (@icon->{value});
+	my %icons = {};
+
+	while True {
+		break if (!defined @icon);
+		my @size = @icon[0..8];
+		break if (scalar @size != 8 || !defined $size[4]);
+		@icon = @icon[8..-1];
+		
+		my $width = $size[0];
+		my $height = $size[4];
+		my $next_pix = $width * $height * 4;
+		my @data[0..$next_pix];
+		my @arr = ("B") += @data;
+
+		for (my $i = 0; $i < scalar @arr; $i += 4) {
+			my $mult = $arr[$i + 3] / 255.0;
+			$arr[$i + 0] = round $arr[$i + 0] * $mult;
+			$arr[$i + 1] = round $arr[$i + 1] * $mult;
+			$arr[$i + 2] = round $arr[$i + 2] * $mult;
+		}
+
+		@icon = $icon[$next_pix..-1];
+		$icons{"$width/$height"} = @arr;
+	}
+
+	$self->{icons} = %icons;
+	$hook->fire('net_wm_icon_change', $self);
+}
+
+sub handle_client_message {
+	my $event = shift;
+	my @atoms = $self->{plwm}->{conn}->{atoms};
+	my $opcode = $event->{type};
+	my @data = $event->{data};
+
+	if ($atoms['_NET_WM_STATE'] == $opcode) {
+		my @prev_state = $self->{window}->get_property('_NET_WM_STATE'. 'ATOM');
+		my @current_state = uniq $prev_state;
+		my $action = $data->{data32}[0];
+
+		for my $prop (($data->{data32}[1], $data->{data32}[2])) {
+			next if (!defined $prop);
+			
+			if ($action == $_NET_WM_STATE_REMOVE) {
+				@current_state->discard($prop)
+			} elsif ($action == $_NET_WM_STATE_ADD) {
+				@current_state->add($prop);
+			} elsif ($action == $_NET_WM_STATE_TOGGLE) {
+				@current_state ^= uniq (($prop));
+			}
+		}
+
+		$self->{window}->set_property('_NET_WM_STATE', (@current_state));
+	} elsif ($atoms['_NET_WM_ACTIVE_WIBNDOW'] == $opcode) {
+		my $source = $data->{data32}[0];
+
+		if ($sorce == 2) {
+			$logger.info("[!] INFO: plwm: Focusing window by pager\n");
+			$self->{plwm}->{current_screen}->set_group($self->{group});
+			$self->{group}->focus($self);
+		} else {
+			my $focus_behavior = $self->{plwm}->{config}->{focus_on_window_activation};
+
+			if ($focus_behavior == 'focus') {
+				$logger->info("[!] INFO: plwm: Focusing window\n");
+				$self->{plwm}->{current_screen}->set_group($self->{group});
+				$self->{group}->focus($self);
+			} elsif ($focus_behavior == 'smart') {
+				if (!defined $self->{group}->{screen}) {
+					$logger->info("[!] INFO: plwm: Ingoring focus request\n");
+					
+					return;
+				}
+
+				if ($self->{group}->{screen} == $self->{plwm}->{current_screen}) {
+					$logger->info("[!] INFO: plwm: Focusing window\n");
+					$self->{plwm}->{current_screen}->set_group($self->{group});
+					$self->{group}->focus($self);
+				} else {
+					$logger->info("[!] INFO: plwm: Setting urgent flag for window\n");
+					$self->{urgent} = True;
+				}
+			} elsif ($focus_behavior == 'urgent') {
+				$logger->info("[!] INFO: plwm: Setting urgent flag for window\n");
+				$self->{urgent} = True;
+			} elsif ($foucs_behavior == 'never') {
+				$logger->info("[!] INFO: plwm: Ignoring focus request\n");
+			} else {
+				$logger->warning("[!] WARNING: plwm: Invalid value for focus_on_window_activation: $focus_behavior\n");
+			}
+		}
+	} elsif ($atoms['_NET_CLOSE_WINDOW'] == $opcode) {
+		$self->kill();
+	} elsif ($atoms['WM_CHANGE_STATE'] == $opcode) {
+		my $state = $data->{data32}[0];
+
+		if ($state = $NORMAL_STATE) {
+			$self->{minimized} = False;
+		} elsif ($state == $$ICONIC_STATE) {
+			$self->{minimized} = True;
+		}
+	} else {
+		$logger->info("[!] INFO: plwm: Unhandled client message: $atoms->get_name($opcode)\n");
+	}
+}
+
+sub handle_property_notify {
+	my $e = shift;
+	my $name = $self->{plwm}->{conn}->{atoms}->get_name($e->{atom});
+	
+	$logger->debug("[!] DEBUG: plwm: PROPERTY_NOTIFY_EVENT: $name");
+
+	if ($name == 'WM_TRANSIENT_FOR') {
+		...
+	} elsif ($name == 'WM_HINTS') {
+		$self->update_hints();
+	} elsif ($name == 'WM_NORMAL_HINTS') {
+		$self->update_hints();
+	} elsif ($name == 'WM_NAME') {
+		$self->update_name();
+	} elsif ($name == '_NET_WM_NAME') {
+		$self->update_name();
+	} elsif ($name == '_NET_WM_VISIBLE_NAME') {
+		$self->update_name();
+	} elsif ($name == 'WM_ICON_NAME') {
+		...
+	} elsif ($name == '_NET_WM_ICON_NAME') {
+		...
+	} elsif ($name == '_NET_WM_ICON') {
+		$self->update_wm_net_icon();
+	} elsif ($name == 'ZOOM') {
+		...
+	} elsif ($name == '_NET_WM_WINDOW_OPACITY') {
+		...
+	} elsif ($name == 'WM_STATE') {
+		...
+	} elsif ($name == '_NET_WM_STATE') {
+		$self->update_state();
+	} elsif ($name == 'WM_PROTOCOLS') {
+		...
+	} elsif ($name == '_NET_WM_DESKTOP') {
+		$self->update_state();
+	} else {
+		$logger->info("[!] INFO: plwm: Unknown window property : $name");
+	}
+
+	return False;
+}
+
+sub items {
+	my $name = shift;
+
+	if ($name == 'group') {
+		return (True, undef);
+	} elsif ($name == 'layout') {
+		return (True, (0..$self->{group}->{layouts}));
+	} elsif ($name == 'screen') {
+		return (True, undef);
+	}
+}
+
+sub select {
+	my ($name, $sel) = @_;
 }
