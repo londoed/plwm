@@ -14,6 +14,7 @@ package Window;
 use X11::Proto;
 use Plwm qw(hook utils CommandError CommandObject logger);
 use Math::Round;
+use List::MoreUtils qw(first_index);
 
 # CONSTANTS #
 our $NO_VALUE 															= 0x0000;
@@ -460,4 +461,207 @@ sub do_focus {
 	}
 
 	return False;
+}
+
+1sub focus {
+	my $warp = shift;
+	my $did_focus = $self->do_focus();
+
+	if (!defined $did_focus) {
+		return False;
+	}
+
+	if (defined $warp && $self->{tile}->{config}->{cursor_warp}) {
+		$self->{window}->warp_pointer($self->{width} // 2, $self->{height} // 2);
+	}
+
+	if (defined $self->{urgent}) {
+		$self->{urgent} = False;
+		my $atom = $self->{tile}->{conn}->{atoms}['_NET_WM_STATE_DEMANDS_ATTENTION'];
+		my @state = ($self->{window}->get_property('_NET_WM_STATE', 'ATOM'));
+		my $idx = first_index { $_ eq $atom }, @state;
+
+		if (grep(/^$atom/, @state)) {
+			splice @state, $idx, 1;
+			$self->{window}->set_property('NET_WM_STATE', @state);
+		}
+	}
+
+	$self->{plwm}->{root}->set_property('_NET_ACTIVE_WINDOW', $self->{window}->{wid});
+	$hook->fire('client_focus', $self);
+
+	return True; 
+}
+
+sub items {
+	my $name = shift;
+
+	return undef;
+}
+
+sub select {
+	my ($name, $sel) = @_;
+
+	return undef;
+}
+
+sub cmd_focus {
+	if (!defined $warp) {
+		my $warp = $self->{plwm}->{config}->{cursor_warp};
+	}
+
+	$self->focus(warp => $warp);
+}
+
+sub cmd_info {
+	return $self->info();
+}
+
+sub cmd_hints {
+	return $self->{hints};
+}
+
+sub cmd_inspect {
+	my @a = $self->{window}->get_attributes();
+	my %attrs = {
+		backing_store => $a->{backing_store},
+		visual => $a->{visual},
+		class => $a->{class},
+		bit_gravity => $a->{bit_gravity},
+		win_gravity => $a->{win_gravity},
+		backing_planes => $a->{backing_planes},
+		backing_pixel => $a->{backing_pixel},
+		save_under => $a->{save_under},
+		map_is_installed => $a->{map_is_installed},
+		map_state => $a->{map_state},
+		override_redirect => $a->{override_redirect},
+		all_event_masks => $a->{all_event_masks},
+		your_event_mask => $a->{your_event_mask},
+		do_not_propagate_mask => $a->{do_not_propagate_mask},
+	};
+
+	my @props = $self->{window}->get_properties();
+	my @normal_hints = $self->{window}->get_wm_normal_hints();
+	my @hints = $self->{window}->get_wm_hints();
+	my @protocols = ();
+
+	for my $i ($self->{window}->get_wm_protocols()) {
+		push @protocols, $i;
+	}
+
+	my $state = $self->{window}->get_wm_state();
+
+	return {
+		attributes => %attrs,
+		properties => @props,
+		name => $self->{window}->get_name(),
+		wm_class => $self->{window}->get_wm_class(),
+		wm_window_role => $self->{window}->get_wm_window_role(),
+		wm_type => $self->{window}->get_wm_type(),
+		wm_transient_for => $self->{window}->get_wm_transient_for(),
+		protocols => @protocols,
+		wm_icon_name => $self->{window}->get_wm_icon_name(),
+		wm_client_machine => $self->{window}->get_wm_client_machine(),
+		normal_hints => @normal_hints,
+		hints => @hints,
+		state = $state,
+		float_info => $self->{float_info},
+	};
+}
+
+package Internal;
+@ISA = qw(Window);
+
+my $window_mask = $EVENT_MASK | $STRUCTURE_NOTIFY | $PROPERTY_CHANGE | $ENTER_WINDOW |
+	$LEAVE_WINDOW | $POINTER_MOTION | $FOCUS_CHANGE | $EXPOSURE | $BUTTON_PRESS | $BUTTON_RELEASE |
+	$KEY_PRESS;
+
+
+sub create {
+	my ($cls, $tile, $x, $y, $width, $height, $opacity) = @_;
+	my $win = $tile->{conn}->create_window($x, $y, $width, $height);
+	$win->set_property('TILE_INTERNAL', 1);
+	my $i = Internal->new($win, $tile);
+	$i->place($x, $y, $width, $height, 0, undef);
+	$i->{opacity} = $opacity;
+
+	return $i
+}
+
+sub representation {
+	return "Internal($self->{name}, $self->{window}->{wid})";
+}
+
+sub cmd_kill {
+	$self->kill();
+}
+
+package Static;
+@ISA = qw(Window);
+
+my $window_mask = $STRUCTURE_NOTIFY | $PROPERTY_CHANGE | $ENTER_WINDOW | $FOCUS_CHANGE |
+	$EXPOSURE;
+
+sub new {
+	my ($win, $tile, $screen, $x, $y, $width, $height) = @_;
+
+	$self->update_name();
+	$self->{conf_x} = $x;
+	$self->{conf_y} = $y;
+	$self->{conf_width} = $width;
+	$self->{conf_height} = $height;
+
+	$x = $x || 0;
+	$y = $y || 0;
+	$self->{x} = $x + $screen->{x};
+	$self->{y} = $y + $screen->{y};
+
+	$self->{width} = $width || 0;
+	$self->{height} = $height || 0;
+	$self->{screen} = $screen;
+
+	$self->place($self->{x}, $self->{y}, $self->{width}, $self->{height}, 0, 0);
+	$self->update_strut();
+}
+
+sub handle_configure_request {
+	my $e = shift;
+	my $cw = X11::Proto::ConfigWindow->new;
+
+	if (!defined $self->{conf_x} && $e->{value_mask} & $cw->{X}) {
+		$self->{x} = $e->{x};
+	}
+
+	if (!defined $self->{conf_y} && $e->{value_mask} & $cw->{Y}) {
+		$self->{y} = $e->{y};
+	}
+
+	if (!defined $self->{width} && $e->{value_mask} & $cq->{Width}) {
+		$self->{width} = $e->{width};
+	}
+
+	if (!defined $self->{height} && $e->{value_mask} & $cw->{Height}) {
+		$self->{height} = $e->{height};
+	}
+
+	$self->place(
+		$self->{screen}->{x} + $self->{x},
+		$self->{screen}->{y} + $self->{y},
+		$self->{width},
+		$self->{height},
+		$self->{border_width},
+		$self->{border_color}
+	);
+
+	return False;
+}
+
+sub update_strut {
+	my @strut = $self->{window}->get_property('_NET_WM_STRUT_PARTIAL');
+
+	@strut = @strut || $self->{window}->get_property('_NET_WM_STRUT');
+
+	if (defined @strut) {
+		$self->{tile}->add_strut(@strut);
+	}
 }
