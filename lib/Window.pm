@@ -1284,4 +1284,176 @@ sub items {
 
 sub select {
 	my ($name, $sel) = @_;
+
+	if ($name == 'group') {
+		return $self->{group};
+	} elsif ($name == 'layout') {
+		return (!defined $self) ? $self->{group}->{layout} : Plwm::Utils.lget($self->{group}->{layouts}, $sel);
+	} elsif ($name == 'screen') {
+		return $self->{group}->{screen};
+	}
+}
+
+sub representation {
+	return "Window($self->{name})";
+}
+
+sub cmd_kill {
+	$sefl->kill();
+}
+
+sub cmd_to_group {
+	my ($group_name, $switch_group) = @_;
+
+	$self->to_group($group_name, $switch_group);
+}
+
+sub cmd_to_screen {
+	my $index = shift;
+
+	$self->to_screen($index);
+}
+
+sub cmd_move_floating {
+	my ($dx, $dy) = @_;
+
+	$self->tweak_float($dx, $dy);
+}
+
+sub cmd_resize_floating {
+	my ($dw, $dh) = @_;
+
+	$self->tweak_float($dw, $dh);
+}
+
+sub cmd_set_position_floating {
+	my ($x, $y) = @_;
+
+	$self->tweak_float($x, $y);
+}
+
+sub cmd_set_size_floating {
+	my ($w, $h) = @_;
+
+	$self->tweak_float($w, $h);
+}
+
+sub cmd_place {
+	my ($x, $y, $width, $height, $border_width, $border_color, $above, $margin) = @_;
+
+	$self->place($x, $y, $width, $height, $border_width, $border_color, $above, $margin);
+}
+
+sub cmd_get_position {
+	return $self->get_position();
+}
+
+sub cmd_get_size {
+	return $self->get_size();
+}
+
+sub cmd_toggle_floating {
+	$self->toggle_floating();
+}
+
+sub cmd_enable_floating {
+	$self->{floating} = True;
+}
+
+sub cmd_disable_floating {
+	$self->{floating} = False;
+}
+
+sub cmd_toggle_maximize {
+	$self->toggle_maximize();
+}
+
+sub cmd_toggle_fullscreen {
+	$self->toggle_fullscreen();
+}
+
+sub cmd_enable_fullscreen {
+	$self->{fullscreen} = True;
+}
+
+sub cmd_disable_fullscreen {
+	$self->{fullscreen} = False;
+}
+
+sub cmd_toggle_minimize {
+	$self->toggle_minimize();
+}
+
+sub cmd_bring_to_front {
+	if $self->{floating} {
+		$self->{window}->configure(stack_mode => $ABOVE);
+	} else {
+		$self->reconfigure_floating();
+	}
+}
+
+sub cmd_match {
+	my ($args, $kwargs) = @_;
+
+	return $self->match($args, $kwargs);
+}
+
+sub cmd_opacity {
+	my $opacity = shift;
+
+	if ($opacity < 0.1) {
+		$self->{opacity} = 0.1;
+	} elsif ($opacity > 1) {
+		$self->{opacity} = 1;
+	} else {
+		$self->{opacity} = $opacity;
+	}
+}
+
+sub cmd_down_opacity {
+	if ($self->{opacity} > 0.2) {
+		$self->{opacity} -= 0.1;
+	} else {
+		$self->{opacity} = 0.1;
+	}
+}
+
+sub cmd_up_opacity {
+	if ($self->{opacity} < 0.9) {
+		$self->{opacity} += 0.1;
+	} else {
+		$self->{opacity} = 1;
+	}
+}
+
+sub is_in_window {
+	return ($window->{edges}[0] <= $window->{edges}[2] &&
+		$window->{edges}[1] <= $y <= $window->{edges}[3]);
+}
+
+sub cmd_set_position {
+	my ($x, $y) = @_;
+
+	if (defined $self->{floating}) {
+		$self->tweak_float($x, $y);
+
+		return;
+	}
+
+	for my $window ($self->{group}->{windows}) {
+		continue if ($window == $self || defined $window->{floating});
+
+		my ($cur_x, $cur_y) = $self->{plwm}->get_mouse_position();
+
+		if ($self->is_in_window($cur_x, $cur_y, $window)) {
+			my @clients = $self->{group}->{layout}->{clients};
+			my $index1 = @clients->index($self);
+			my $index2 = @clients->index($window);
+
+			($clients[$index1], $clients[$index2]) = ($clients[$index2], $clients[$index1]);
+			$self->{group}->{layout}->{focused} = $index2;
+			$self->{group}->layout_all();
+
+			break;
+		}
 }
