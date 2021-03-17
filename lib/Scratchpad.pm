@@ -146,5 +146,175 @@ package ScratchPad;
 our @ISA = qw(Group::_Group);
 
 sub new {
+	my $class = @_;
+	my $self = $class->SUPER::new($_[1], $_[2], $_[3]);
+	my %dropdown_config = {};
 
+	for my $dd (@dropdowns) {
+		$dropdown_conif{$dd->{name}} = $dd;
+	}
+
+	my %dropdowns = {};
+	my %spawned = {};
+	my @to_hide = ();
+
+	bless $self, $class;
+	return $self;
+}
+
+sub check_unsubscribe {
+	if (!defined $self->{dropdowns}) {
+		$hook->{unsubscribe}->client_killed($self->{on_client_killed});
+		$hook->{unsubscribe}->float_change($self->{on_float_change});
+	}
+}
+
+sub spawn {
+	my $ddconfig = shift;
+	my $name = $ddconfig->{name};
+
+	if (!grep(/^$name/, $self->{spawned}->{values})) {
+		if (!defined $self->{spawned}) {
+			$hook->{subscribe}->client_new($self->{on_client_new});
+		}
+
+		my $cmd = $self->{dropdown_config}[$name]->{command};
+		my $pid = $self->{plwm}->cmd_spawm($cmd);
+		$self->{spawmed}[$pid] = $name;
+	}
+}
+
+sub on_client_new {
+	my $client_pid = $client->{window}->get_net_wm_pid();
+
+	if (grep(/^$client_pid/, $self->{spawned})) {
+		my $name = $self->{spawned}->pop($client_pid);
+
+		if (!defined $self->{spawned}) {
+			$hook->{unsubscribe}->client_new($self->{on_client_new});
+		}
+
+		$self->{dropdowns}[$name] = DropDownToggler->new($client, $self->{name}, $self->{dropdown_config}[$name]);
+
+		if (grep(/^$name/, $self->{to_hide})) {
+			$self->{dropdowns}[$name]->hide();
+			$self->{to_hide}->remove($name);
+		}
+
+		if (scalar $self->{dropdowns} == 1) {
+			$hook->subscribe->client_killed($self->{on_client_killed});
+			$hook->subscribe->float_change($self->{on_float_change});
+		}
+	}
+}
+
+sub on_client_killed {
+	my ($client, $args, $kwargs) = @_;
+	my $name = undef;
+
+	for (keys $self->{dropdowns}) {
+		my $value = $self->{dropdowns}{$_};
+
+		if ($value->{window} == $client) {
+			$value->unsubscribe();
+			delete $value;
+			break;
+		}
+	}
+	
+	$self->check_unsubscribe();
+}
+
+sub on_float_change {
+	my ($args, @kwargs) = @_;
+	my $name = undef;
+
+	for (keys $self->{dropdowns}) {
+		my $value = $self->{dropdowns}{$_};
+		
+		if (!defined $value->{window}->{floating}) {
+			$value->unsubscribe();
+			delete $value;
+			break;
+		}
+	}
+
+	$self->check_unsubscribe();
+}
+
+sub cmd_dropdown_toggle {
+	my $name = shift;
+
+	if (grep(/^$name/, $self->{dropdowns})) {
+		$self->{dropdowns}{$name}->toggle();
+	} else {
+		if (grep(/^$name/, $self->{dropdown_config})) {
+			$self->spawn($self->dropdown_config[$name]);
+		}
+	}
+}
+
+sub cmd_dropdown_reconfigure {
+	return if (!grep(/^$name/, $self->{dropdown_config}));
+
+	my $dd = $self->{dropdown_config}{$name};
+
+	for (keys %kwargs) {
+		my $value = %kwarg{$_};
+
+		if ($dd->has_attr($_)) {
+			$dd->set_attr($_, $value);
+		}
+	}
+}
+
+sub cmd_dropdown_info {
+	my $name = shift;
+
+	if (!defined $name) {
+		for my $ddname ($self->{dropdown_config}) {
+			return $self->{dropdown_config}{'dropdowns'} = $ddname;
+		}
+	} elsif (grep(/^$name/, $self->{dropdowns})) {
+		return $self->{dropdowns}{$name}->info();
+	} elsif (grep(/^$name/, $self->{dropdown_config})) {
+		return $self->dropdown_config[$name]->info();
+	} else {
+		die "[!] ERROR: plwm: No dropdown named : `$name`\n";
+	}
+}
+
+sub get_state {
+	my @state = ();
+
+	for (keys $self->{dropdowns}) {
+		my $value = $self->{dropdowns}{$_};
+		my $pid = $value->{window}->{window}->get_net_wm_pid();
+		push @state, ($name, $pid, $value->{visible});
+	}
+
+	return @state;
+}
+
+sub resore_state {
+	my @state = shift;
+	my @orphans = ();
+	
+	while my ($name, $pid, $visible) = each (@state) {
+		if (grep(/^$name/, $self->{dropdown_configs})) {
+			$self->{spawned}[$pid] = $name;
+
+			if (!defined $visible) {
+				push $self->{to_hide}, $name;
+			} else {
+				push @orphans, $pid;
+			}
+		}
+	}
+
+	if (defined $self->{spawned}) {
+		$hook->{subscribe}->client_new($self->{on_client_new});
+	}
+
+	return @orphans;
 }
