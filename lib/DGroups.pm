@@ -242,3 +242,33 @@ sub add {
 
 	$self->sort_groups();
 }
+
+sub sort_groups {
+	my @grps = $self->{plwm}->{groups};
+	my @sorted_grps = sort @grps, $self->{groups_map}{$g->{name}}->{position};
+
+	if (@grps != @sorted_grps) {
+		$self->{plwm}->{groups} = @sorted_grps;
+		$hook->fire('change_group');
+	}
+}
+
+sub del {
+	my $client = shift;
+	my $group = $client->{group};
+	
+	sub delete_client {
+		if (defined $group && grep(/^$group->{name}/, $self->{groups_map}) &&
+			!$self->{groups_map}{$group_name}->{persist} && scalar $group->{windows} <= 0) {
+		
+			$self->{plwm}->delete_group($group->{name});
+			$self->sort_groups();
+		}
+
+		delete $self->{timeout}{$client};
+	}
+
+	$logger->info("[!] INFO: plwm: Add dgroup timer with delay $self->{delay}s\n");
+	$self->{timeout}{$client} = $self->{plwm}->call_later($self->{delay}, delete_client());
+}
+
