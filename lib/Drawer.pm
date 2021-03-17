@@ -11,6 +11,7 @@ use XCB::Cairo;
 use XCB::XProto;
 use XCB::Pango;
 use Plwm;
+use List::Utils qw(max);
 
 package TextLayout;
 
@@ -492,4 +493,79 @@ sub find_root_visual {
 
 sub new_ctx {
 	return XCB::Pango->patch_cairo_context(XCB::Cairo::Context->new($self->{surface}));
+}
+
+sub set_source_rgb {
+	my @color = shift;
+
+	if (ref(@color) ~~ array) {
+		if (scalar @color == 0) {
+			$self->{ctx}->set_source_rgb(Plwm::Utils->rgb('#000000'));
+		} elsif (scalar @color == 1) {
+			$self->{ctx}->set_source_rgb(Plwm::Utils->rgb($color[0]));
+		} else {
+			my $linear = XCB::Pango::LinearGradient->new(0.0, 0.0, 0.0, $self->{height});
+			my $step_size = 1.0 / (scalar @color - 1);
+			my $step = 0.0;
+
+			for my $c (@color) {
+				my @rgb_col = Plwm::Utils->rgc($c);
+
+				if (scalar @rgb_col < 4) {
+					$rgb_col[3] = 1;
+				}
+
+				$linear->add_color_stop_rgba($step, @rgb_col);
+				$step += $step_size;
+			}
+
+			$self->{ctx}->set_source($linear);
+		}
+	} else {
+		$self->{ctx}->set_source_rgba(Plwm::Utils->rgb(@color));
+	}
+}
+
+sub clear {
+	my @color = shift;
+
+	$self->set_source_rgb(@color);
+	$self->{ctx}->rectangle(0, 0, $self->{width}, $self->{height});
+	$self->{ctx}->fill();
+	$self->{ctx}->stroke();
+}
+
+sub text_layout {
+	my ($text, $color, $font_family, $font_size, $font_shadow, $markup, @kw) = @_;
+	$markup //= False;
+
+	return TextLayout->new($text, $color, $font_family, $font_size, $font_shadow,
+		$markup, @kw);
+}
+
+sub max_layout_size {
+	my ($font_family, $font_size, @texts) = @_;
+	my $size_layout = $self->text_layout(
+		"", "ffffff", $font_family, $font_size, undef
+	);
+	my @widths = ();
+	my @heights = ();
+
+	for $i (@texts) {
+		$size_layout->{text} = $i;
+		push @widths, $size_layout->{width};
+		push @heights, $size_layout->{height};
+	}
+
+	return (max(@widths), max(@heights));
+}
+
+sub set_font {
+	my ($font_face, $size) = @_;
+
+	$self->{ctx}->select_font_face($font_face);
+	$self->{ctx}->set_font_size($size);
+
+	my $fo = $self->{ctx}->get_font_options();
+	$fo->set_antialias(XCB::Cairo::ANTIALIAS_SUBPIXEL);
 }
